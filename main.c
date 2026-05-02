@@ -211,6 +211,7 @@ int main(int argc, char **argv) {
     int cols = w.ws_col;
     char query[256] = {0};
     size_t len = 0;
+    size_t cursor = 0;
     char c;
     size_t selected = 0;
     size_t offset = 0;
@@ -228,14 +229,14 @@ int main(int argc, char **argv) {
         free(matched_list.items);
         matched_list = sort_matched_item_list(&list, query);
         print_matched_list_items(&matched_list, selected, rows, cols, offset);
-        fprintf(tty, "\033[1;%zuH", strlen(prompt) + len + 2);
+        fprintf(tty, "\033[1;%zuH", strlen(prompt) + cursor + 2);
         fflush(tty);
 
         int read_result = read(tty_fd, &c, 1);
         if (read_result == -1) continue;
         if (read_result == 0) break;
 
-        if (c == '\n') {
+        if (c == '\n' || c == 0x19) { // enter or ctrl-y
             if (matched_list.count <= 0) continue;
             disable_raw_mode(tty_fd);
             exit_alternate_buffer(tty);
@@ -252,28 +253,65 @@ int main(int argc, char **argv) {
             read(tty_fd, &seq[0], 1);
             read(tty_fd, &seq[1], 1);
             if (seq[0] == '[') {
-                if (seq[1] == 'A') {
+                if (seq[1] == 'A') { // up arrow
                     if (selected > 0) selected--;
                     if (selected < offset) offset--;
-                }
-                if (seq[1] == 'B') {
+                } else if (seq[1] == 'B') { // down arrow
                     if (matched_list.count > 0 && selected < matched_list.count - 1) selected++;
                     if (selected >= offset + (size_t)rows) offset++;
+                } else if (seq[1] == 'C') { // right arrow
+                    if (cursor < len) cursor++;
+                } else if (seq[1] == 'D') { // left arrow
+                    if (cursor > 0) cursor--;
                 }
             }
             continue;
         }
-        if (c == 127) {
-            if (len > 0) {
-                len--;
+        if (c == 0x01) { // ctrl-a
+            cursor = 0;
+        } else if (c == 0x05) { // ctrl-e
+            cursor = len;
+        } else if (c == 0x02) { // ctrl-b
+            if (cursor > 0) cursor--;
+        } else if (c == 0x06) { // ctrl-f
+            if (cursor < len) cursor++;
+        } else if (c == 0x0E) { // ctrl-n
+            if (matched_list.count > 0 && selected < matched_list.count - 1) selected++;
+            if (selected >= offset + (size_t)rows) offset++;
+        } else if (c == 0x10) { // ctrl-p
+            if (selected > 0) selected--;
+            if (selected < offset) offset--;
+        } else if (c == 0x15) { // ctrl-u
+            if (cursor > 0) {
+                memmove(&query[0], &query[cursor], len - cursor + 1);
+                len = len - cursor;
+                cursor = 0;
                 query[len] = '\0';
                 selected = 0;
                 offset = 0;
             }
-        } else {
+        } else if (c == 0x0B) { // ctrl-k
+            if (cursor < len) {
+                query[cursor] = '\0';
+                len = cursor;
+                selected = 0;
+                offset = 0;
+            }
+        } else if (c == 127) { // backspace
+            if (cursor > 0) {
+                memmove(&query[cursor - 1], &query[cursor], len - cursor + 1);
+                len--;
+                cursor--;
+                query[len] = '\0';
+                selected = 0;
+                offset = 0;
+            }
+        } else { // any other character
             if (len < sizeof(query) - 1) {
-                query[len] = c;
+                memmove(&query[cursor + 1], &query[cursor], len - cursor + 1);
+                query[cursor] = c;
                 len++;
+                cursor++;
                 query[len] = '\0';
                 selected = 0;
                 offset = 0;
