@@ -149,7 +149,7 @@ void read_from_directory(MatchedItemList *list, char *base_path) {
     closedir(dir);
 }
 
-void restore_terminal() {
+void restore_terminal(int) {
     free_matched_item_list(&list);
     free(matched_list.items); // only free the pointer, not items - owned by list
     disable_raw_mode(tty_fd);
@@ -160,15 +160,31 @@ void restore_terminal() {
     exit(0);
 }
 
-int main() {
-    signal(SIGINT, restore_terminal);
-
+void open_terminal() {
     tty = fopen("/dev/tty", "r+");
     if (!tty) {
         printf("Failed to open /dev/tty\n");
         exit(1);
     }
     tty_fd = fileno(tty);
+}
+
+int main(int argc, char **argv) {
+    signal(SIGINT, restore_terminal);
+
+    char *prompt = "Query>";
+    for (size_t i = 1; i < (size_t)argc; i++) {
+        if (strcmp(argv[i], "-p") == 0) {
+            if (i + 1 >= (size_t)argc) {
+                printf("Missing argument for -p\n");
+                exit(1);
+            }
+            i++;
+            prompt = argv[i];
+        }
+    }
+
+    open_terminal();
 
     init_matched_item_list(&list);
 
@@ -192,11 +208,11 @@ int main() {
 
     while (1) {
         clear_screen(tty);
-        fprintf(tty, "Query: %s\n", query);
+        fprintf(tty, "%s %s\n", prompt, query);
         free(matched_list.items);
         matched_list = sort_matched_item_list(&list, query);
         print_matched_list_items(&matched_list, selected, rows, offset);
-        fprintf(tty, "\033[1;%zuH", strlen("Query: ") + len + 1);
+        fprintf(tty, "\033[1;%zuH", strlen(prompt) + len + 2);
         fflush(tty);
 
         int read_result = read(tty_fd, &c, 1);
