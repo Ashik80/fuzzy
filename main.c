@@ -21,6 +21,7 @@ typedef struct {
 } MatchedItemList;
 
 MatchedItemList list;
+MatchedItemList matched_list;
 struct termios orig_termios;
 int tty_fd;
 FILE *tty;
@@ -62,16 +63,23 @@ int compare_match(const void *a, const void *b) {
     return (*(MatchedItem **)b)->score - (*(MatchedItem **)a)->score;
 }
 
-void sort_matched_item_list(MatchedItemList *list, const char *query) {
+MatchedItemList sort_matched_item_list(MatchedItemList *list, const char *query) {
+    MatchedItemList temp;
+    init_matched_item_list(&temp);
     for (size_t i = 0; i < list->count; i++) {
         MatchedItem *item = list->items[i];
         item->score = fuzzy_score(item->text, query);
+        if (item->score != NO_MATCH) {
+            add_matched_item_to_list(&temp, item);
+        }
     }
-    qsort(list->items, list->count, sizeof(MatchedItem *), compare_match);
+    qsort(temp.items, temp.count, sizeof(MatchedItem *), compare_match);
+    return temp;
 }
 
 void free_matched_item_list(MatchedItemList *list) {
     for (size_t i = 0; i < list->count; i++) {
+        free(list->items[i]->text);
         free(list->items[i]);
     }
     free(list->items);
@@ -100,7 +108,6 @@ void read_from_directory(MatchedItemList *list, char *base_path) {
     DIR *dir = opendir(base_path);
     if (dir == NULL) {
         printf("Failed to open directory: %s\n", base_path);
-        free(list);
         exit(1);
     }
     struct dirent *entry;
@@ -111,6 +118,7 @@ void read_from_directory(MatchedItemList *list, char *base_path) {
         sprintf(path, "%s/%s", base_path, entry->d_name);
         if (entry->d_type == DT_DIR) {
             read_from_directory(list, path);
+            free(path);
         } else {
             MatchedItem *item = add_score_to_item(path, 0);
             add_matched_item_to_list(list, item);
@@ -152,6 +160,7 @@ void clear_screen() {
 
 void restore_terminal(int sig) {
     free_matched_item_list(&list);
+    free(matched_list.items); // only free the pointer, not items - owned by list
     disable_raw_mode();
     exit_alternate_buffer();
     show_cursor();
@@ -194,8 +203,9 @@ int main() {
     while (1) {
         clear_screen();
         fprintf(tty, "Query: %s\n", query);
-        sort_matched_item_list(&list, query);
-        print_matched_list_items(&list, selected, rows, offset);
+        free(matched_list.items);
+        matched_list = sort_matched_item_list(&list, query);
+        print_matched_list_items(&matched_list, selected, rows, offset);
         fflush(tty);
 
         int read_result = read(tty_fd, &c, 1);
@@ -203,13 +213,15 @@ int main() {
         if (read_result == 0) break;
 
         if (c == '\n') {
+            if (matched_list.count <= 0) continue;
             disable_raw_mode();
             exit_alternate_buffer();
             show_cursor();
             fflush(tty);
             fclose(tty);
-            printf("%s\n", list.items[selected]->text);
+            printf("%s\n", matched_list.items[selected]->text);
             free_matched_item_list(&list);
+            free(matched_list.items);
             exit(0);
         }
         if (c == '\033') {
@@ -222,7 +234,7 @@ int main() {
                     if (selected < offset) offset--;
                 }
                 if (seq[1] == 'B') {
-                    if (selected < list.count - 1) selected++;
+                    if (matched_list.count > 0 && selected < matched_list.count - 1) selected++;
                     if (selected >= offset + rows) offset++;
                 }
             }
@@ -233,16 +245,21 @@ int main() {
                 len--;
                 query[len] = '\0';
                 selected = 0;
+                offset = 0;
             }
         } else {
-            query[len] = c;
-            len++;
-            query[len] = '\0';
-            selected = 0;
+            if (len < sizeof(query) - 1) {
+                query[len] = c;
+                len++;
+                query[len] = '\0';
+                selected = 0;
+                offset = 0;
+            }
         }
     }
 
     free_matched_item_list(&list);
+    free(matched_list.items);
     disable_raw_mode();
     exit_alternate_buffer();
     show_cursor();
