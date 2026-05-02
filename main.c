@@ -4,10 +4,11 @@
 #include <stdlib.h>
 #include <dirent.h>
 #include <unistd.h>
-#include <termios.h>
 #include <sys/ioctl.h>
 #include <signal.h>
 #include "fuzzy.h"
+#include "term_escapes.h"
+#include "term_mode.h"
 
 typedef struct {
     char *text;
@@ -22,12 +23,15 @@ typedef struct {
 
 MatchedItemList list;
 MatchedItemList matched_list;
-struct termios orig_termios;
 int tty_fd;
 FILE *tty;
 
 MatchedItem * add_score_to_item(char *text, int score) {
     MatchedItem *item = malloc(sizeof(MatchedItem));
+    if (!item) {
+        printf("Failed to allocate memory for matched item\n");
+        exit(1);
+    }
     item->text = text;
     item->score = score;
     return item;
@@ -36,25 +40,35 @@ MatchedItem * add_score_to_item(char *text, int score) {
 void init_matched_item_list(MatchedItemList *list) {
     list->size = 5;
     list->count = 0;
-    list->items = malloc(list->size * sizeof(MatchedItem *));
+    MatchedItem **mem = malloc(list->size * sizeof(MatchedItem *));
+    if (!mem) {
+        printf("Failed to allocate memory for matched item list\n");
+        exit(1);
+    };
+    list->items = mem;
 }
 
 void add_matched_item_to_list(MatchedItemList *list, MatchedItem *item) {
     if (list->count >= list->size) {
         list->size *= 2;
-        list->items = realloc(list->items, list->size * sizeof(MatchedItem *));
+        MatchedItem **mem = realloc(list->items, list->size * sizeof(MatchedItem *));
+        if (!mem) {
+            printf("Failed to allocate memory for matched item list\n");
+            exit(1);
+        };
+        list->items = mem;
     }
     list->items[list->count] = item;
     list->count++;
 }
 
-void print_matched_list_items(MatchedItemList *list, const int selected, const int rows, const size_t offset) {
+void print_matched_list_items(MatchedItemList *list, const size_t selected, const int rows, const size_t offset) {
     for (size_t i = offset; i < list->count && i < offset + rows; i++) {
         MatchedItem *item = list->items[i];
         if (i == selected) {
-            fprintf(tty, "> %s: %d\n", item->text, item->score);
+            fprintf(tty, "> %s\n", item->text);
         } else {
-            fprintf(tty, "  %s: %d\n", item->text, item->score);
+            fprintf(tty, "  %s\n", item->text);
         }
     }
 }
@@ -88,7 +102,10 @@ void free_matched_item_list(MatchedItemList *list) {
 char * copy_string(const char *src) {
     size_t len = strlen(src) + 1;
     char *mem = malloc(len);
-    if (!mem) return NULL;
+    if (!mem) {
+        printf("Failed to allocate memory for string\n");
+        exit(1);
+    }
     memcpy(mem, src, len);
     return mem;
 }
@@ -114,8 +131,13 @@ void read_from_directory(MatchedItemList *list, char *base_path) {
     while ((entry = readdir(dir)) != NULL) {
         if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
             continue;
-        char *path = malloc(strlen(base_path) + strlen(entry->d_name) + 2);
-        sprintf(path, "%s/%s", base_path, entry->d_name);
+        int path_len = strlen(base_path) + strlen(entry->d_name) + 2;
+        char *path = malloc(path_len);
+        if (!path) {
+            printf("Failed to allocate memory for path\n");
+            exit(1);
+        }
+        snprintf(path, path_len, "%s/%s", base_path, entry->d_name);
         if (entry->d_type == DT_DIR) {
             read_from_directory(list, path);
             free(path);
@@ -127,43 +149,12 @@ void read_from_directory(MatchedItemList *list, char *base_path) {
     closedir(dir);
 }
 
-void enable_raw_mode() {
-    tcgetattr(tty_fd, &orig_termios);
-    struct termios raw = orig_termios;
-    raw.c_lflag &= ~(ECHO | ICANON);
-    tcsetattr(tty_fd, TCSAFLUSH, &raw);
-}
-
-void disable_raw_mode() {
-    tcsetattr(tty_fd, TCSAFLUSH, &orig_termios);
-}
-
-void enter_alternate_buffer() {
-    fprintf(tty, "\033[?1049h");
-}
-
-void exit_alternate_buffer() {
-    fprintf(tty, "\033[?1049l");
-}
-
-void hide_cursor() {
-    fprintf(tty, "\033[?25l");
-}
-
-void show_cursor() {
-    fprintf(tty, "\033[?25h");
-}
-
-void clear_screen() {
-    fprintf(tty, "\033[H\033[J");
-}
-
-void restore_terminal(int sig) {
+void restore_terminal() {
     free_matched_item_list(&list);
     free(matched_list.items); // only free the pointer, not items - owned by list
-    disable_raw_mode();
-    exit_alternate_buffer();
-    show_cursor();
+    disable_raw_mode(tty_fd);
+    exit_alternate_buffer(tty);
+    show_cursor(tty);
     fflush(tty);
     fclose(tty);
     exit(0);
@@ -188,7 +179,7 @@ int main() {
     }
 
     struct winsize w;
-    ioctl(STDIN_FILENO, TIOCGWINSZ, &w);
+    ioctl(tty_fd, TIOCGWINSZ, &w);
     int rows = w.ws_row - 2;
     char query[256] = {0};
     size_t len = 0;
@@ -196,16 +187,16 @@ int main() {
     size_t selected = 0;
     size_t offset = 0;
 
-    enter_alternate_buffer();
-    enable_raw_mode();
-    hide_cursor();
+    enter_alternate_buffer(tty);
+    enable_raw_mode(tty_fd);
 
     while (1) {
-        clear_screen();
+        clear_screen(tty);
         fprintf(tty, "Query: %s\n", query);
         free(matched_list.items);
         matched_list = sort_matched_item_list(&list, query);
         print_matched_list_items(&matched_list, selected, rows, offset);
+        fprintf(tty, "\033[1;%zuH", strlen("Query: ") + len + 1);
         fflush(tty);
 
         int read_result = read(tty_fd, &c, 1);
@@ -214,9 +205,9 @@ int main() {
 
         if (c == '\n') {
             if (matched_list.count <= 0) continue;
-            disable_raw_mode();
-            exit_alternate_buffer();
-            show_cursor();
+            disable_raw_mode(tty_fd);
+            exit_alternate_buffer(tty);
+            show_cursor(tty);
             fflush(tty);
             fclose(tty);
             printf("%s\n", matched_list.items[selected]->text);
@@ -235,7 +226,7 @@ int main() {
                 }
                 if (seq[1] == 'B') {
                     if (matched_list.count > 0 && selected < matched_list.count - 1) selected++;
-                    if (selected >= offset + rows) offset++;
+                    if (selected >= offset + (size_t)rows) offset++;
                 }
             }
             continue;
@@ -260,9 +251,8 @@ int main() {
 
     free_matched_item_list(&list);
     free(matched_list.items);
-    disable_raw_mode();
-    exit_alternate_buffer();
-    show_cursor();
+    disable_raw_mode(tty_fd);
+    exit_alternate_buffer(tty);
     fclose(tty);
 
     return 0;
