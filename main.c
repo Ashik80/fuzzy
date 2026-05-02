@@ -62,13 +62,24 @@ void add_matched_item_to_list(MatchedItemList *list, MatchedItem *item) {
     list->count++;
 }
 
-void print_matched_list_items(MatchedItemList *list, const size_t selected, const int rows, const size_t offset) {
+void print_matched_list_items(MatchedItemList *list, const size_t selected, const int rows, const int cols, const size_t offset) {
     for (size_t i = offset; i < list->count && i < offset + rows; i++) {
         MatchedItem *item = list->items[i];
+        char *text = item->text;
+        size_t text_len = strlen(text);
+        int available_cols = cols - 4;
+        if (available_cols < 1) available_cols = 1;
+        if (text_len > (size_t)available_cols) {
+            size_t diff = text_len - available_cols;
+            text = text + diff;
+            text[0] = '.';
+            text[1] = '.';
+            text[2] = '.';
+        }
         if (i == selected) {
-            fprintf(tty, "> %s\n", item->text);
+            fprintf(tty, "> %s\n", text);
         } else {
-            fprintf(tty, "  %s\n", item->text);
+            fprintf(tty, "  %s\n", text);
         }
     }
 }
@@ -216,7 +227,7 @@ int main(int argc, char **argv) {
         fprintf(tty, "\n");
         free(matched_list.items);
         matched_list = sort_matched_item_list(&list, query);
-        print_matched_list_items(&matched_list, selected, rows, offset);
+        print_matched_list_items(&matched_list, selected, rows, cols, offset);
         fprintf(tty, "\033[1;%zuH", strlen(prompt) + len + 2);
         fflush(tty);
 
