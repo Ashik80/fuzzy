@@ -3,3 +3,9 @@ build:
 
 leak_check:
 	@valgrind --leak-check=full --show-leak-kinds=all --track-origins=yes -s ./fuzzy
+
+clean:
+	@rm fuzzy
+
+install: build
+	@cp fuzzy /usr/local/bin/fuzzy
