@@ -196,7 +196,8 @@ int main(int argc, char **argv) {
 
     struct winsize w;
     ioctl(tty_fd, TIOCGWINSZ, &w);
-    int rows = w.ws_row - 2;
+    int rows = w.ws_row - 3;
+    int cols = w.ws_col;
     char query[256] = {0};
     size_t len = 0;
     char c;
@@ -209,6 +210,10 @@ int main(int argc, char **argv) {
     while (1) {
         clear_screen(tty);
         fprintf(tty, "%s %s\n", prompt, query);
+        for (size_t i = 0; i < (size_t)cols; i++) {
+            fprintf(tty, "—");
+        }
+        fprintf(tty, "\n");
         free(matched_list.items);
         matched_list = sort_matched_item_list(&list, query);
         print_matched_list_items(&matched_list, selected, rows, offset);
