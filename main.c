@@ -2,60 +2,28 @@
 #include <string.h>
 #include <ctype.h>
 #include <stdlib.h>
-
-#define NO_MATCH -100
-
-const char * fuzzy_match(const char *haystack, const char *needle) {
-    size_t ni = 0;
-    size_t hi = 0;
-    size_t nlen = strlen(needle);
-    while (haystack[hi] != '\0') {
-        if (tolower(haystack[hi]) == tolower(needle[ni])) {
-            ni++;
-        }
-        hi++;
-    }
-    return ni == nlen ? haystack : NULL;
-}
-
-int fuzzy_score(const char *haystack, const char *needle) {
-    int score = 0;
-    int consecutive = 0;
-    size_t ni = 0;
-    size_t hi = 0;
-    size_t nlen = strlen(needle);
-    int match_started = 0;
-    while (haystack[hi] != '\0') {
-        if (tolower(haystack[hi]) == tolower(needle[ni])) {
-            if (match_started == 0) match_started = 1;
-            if (consecutive > 0) {
-                score += consecutive * 3;
-            }
-            if (hi == 0
-                    || haystack[hi - 1] == ' '
-                    || haystack[hi - 1] == '/'
-                    || haystack[hi - 1] == '_'
-                    || haystack[hi - 1] == '-'
-                    || haystack[hi - 1] == '.') {
-                score += 5;
-            }
-            score++;
-            consecutive++;
-            ni++;
-            if (ni == nlen) break;
-        } else {
-            if (match_started == 1) score--;
-            consecutive = 0;
-        }
-        hi++;
-    }
-    return ni == nlen ? score : NO_MATCH;
-}
+#include <dirent.h>
+#include <unistd.h>
+#include <termios.h>
+#include <sys/ioctl.h>
+#include <signal.h>
+#include "fuzzy.h"
 
 typedef struct {
     char *text;
     int score;
 } MatchedItem;
+
+typedef struct {
+    MatchedItem **items;
+    size_t count;
+    size_t size;
+} MatchedItemList;
+
+MatchedItemList list;
+struct termios orig_termios;
+int tty_fd;
+FILE *tty;
 
 MatchedItem * add_score_to_item(char *text, int score) {
     MatchedItem *item = malloc(sizeof(MatchedItem));
@@ -63,12 +31,6 @@ MatchedItem * add_score_to_item(char *text, int score) {
     item->score = score;
     return item;
 }
-
-typedef struct {
-    MatchedItem **items;
-    size_t count;
-    size_t size;
-} MatchedItemList;
 
 void init_matched_item_list(MatchedItemList *list) {
     list->size = 5;
@@ -85,10 +47,14 @@ void add_matched_item_to_list(MatchedItemList *list, MatchedItem *item) {
     list->count++;
 }
 
-void print_matched_list_items(MatchedItemList *list) {
-    for (size_t i = 0; i < list->count; i++) {
+void print_matched_list_items(MatchedItemList *list, const int selected, const int rows, const size_t offset) {
+    for (size_t i = offset; i < list->count && i < offset + rows; i++) {
         MatchedItem *item = list->items[i];
-        printf("%s: %d\n", item->text, item->score);
+        if (i == selected) {
+            fprintf(tty, "> %s: %d\n", item->text, item->score);
+        } else {
+            fprintf(tty, "  %s: %d\n", item->text, item->score);
+        }
     }
 }
 
@@ -96,7 +62,11 @@ int compare_match(const void *a, const void *b) {
     return (*(MatchedItem **)b)->score - (*(MatchedItem **)a)->score;
 }
 
-void sort_matched_item_list(MatchedItemList *list) {
+void sort_matched_item_list(MatchedItemList *list, const char *query) {
+    for (size_t i = 0; i < list->count; i++) {
+        MatchedItem *item = list->items[i];
+        item->score = fuzzy_score(item->text, query);
+    }
     qsort(list->items, list->count, sizeof(MatchedItem *), compare_match);
 }
 
@@ -107,52 +77,176 @@ void free_matched_item_list(MatchedItemList *list) {
     free(list->items);
 }
 
+char * copy_string(const char *src) {
+    size_t len = strlen(src) + 1;
+    char *mem = malloc(len);
+    if (!mem) return NULL;
+    memcpy(mem, src, len);
+    return mem;
+}
+
+void read_from_input_or_pipe(MatchedItemList *list) {
+    char buffer[1024];
+    while (fgets(buffer, sizeof(buffer), stdin)) {
+        if (buffer[strlen(buffer) - 1] == '\n') {
+            buffer[strlen(buffer) - 1] = '\0';
+        }
+        MatchedItem *item = add_score_to_item(copy_string(buffer), 0);
+        add_matched_item_to_list(list, item);
+    }
+}
+
+void read_from_directory(MatchedItemList *list, char *base_path) {
+    DIR *dir = opendir(base_path);
+    if (dir == NULL) {
+        printf("Failed to open directory: %s\n", base_path);
+        free(list);
+        exit(1);
+    }
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != NULL) {
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
+            continue;
+        char *path = malloc(strlen(base_path) + strlen(entry->d_name) + 2);
+        sprintf(path, "%s/%s", base_path, entry->d_name);
+        if (entry->d_type == DT_DIR) {
+            read_from_directory(list, path);
+        } else {
+            MatchedItem *item = add_score_to_item(path, 0);
+            add_matched_item_to_list(list, item);
+        }
+    }
+    closedir(dir);
+}
+
+void enable_raw_mode() {
+    tcgetattr(tty_fd, &orig_termios);
+    struct termios raw = orig_termios;
+    raw.c_lflag &= ~(ECHO | ICANON);
+    tcsetattr(tty_fd, TCSAFLUSH, &raw);
+}
+
+void disable_raw_mode() {
+    tcsetattr(tty_fd, TCSAFLUSH, &orig_termios);
+}
+
+void enter_alternate_buffer() {
+    fprintf(tty, "\033[?1049h");
+}
+
+void exit_alternate_buffer() {
+    fprintf(tty, "\033[?1049l");
+}
+
+void hide_cursor() {
+    fprintf(tty, "\033[?25l");
+}
+
+void show_cursor() {
+    fprintf(tty, "\033[?25h");
+}
+
+void clear_screen() {
+    fprintf(tty, "\033[H\033[J");
+}
+
+void restore_terminal(int sig) {
+    free_matched_item_list(&list);
+    disable_raw_mode();
+    exit_alternate_buffer();
+    show_cursor();
+    fflush(tty);
+    fclose(tty);
+    exit(0);
+}
+
 int main() {
-    char *haystacks[] = {"Hello world!", "Another string", "Something"};
-    size_t haylen = sizeof(haystacks) / sizeof(haystacks[0]);
-    printf("Length of haystacks: %zu\n", haylen);
+    signal(SIGINT, restore_terminal);
 
-    printf("Items:\n");
-    for (size_t i = 0; i < haylen; i++) {
-        printf("%s\n", haystacks[i]);
+    tty = fopen("/dev/tty", "r+");
+    if (!tty) {
+        printf("Failed to open /dev/tty\n");
+        exit(1);
     }
+    tty_fd = fileno(tty);
 
-    printf("\n");
-
-    printf("Enter a search string: ");
-
-    char input[10];
-    fgets(input, 10, stdin);
-    size_t len = strlen(input);
-
-    if (len > 0 && input[len - 1] == '\n') {
-        input[len - 1] = '\0';
-    }
-
-    printf("\n");
-
-    MatchedItemList list;
     init_matched_item_list(&list);
 
-    for (size_t i = 0; i < haylen; i++) {
-        char *haystack = haystacks[i];
-        int score = fuzzy_score(haystack, input);
-        if (score != NO_MATCH) {
-            MatchedItem *item = add_score_to_item(haystack, score);
-            add_matched_item_to_list(&list, item);
+    if (isatty(STDIN_FILENO)) {
+        read_from_directory(&list, ".");
+    } else {
+        read_from_input_or_pipe(&list);
+    }
+
+    struct winsize w;
+    ioctl(STDIN_FILENO, TIOCGWINSZ, &w);
+    int rows = w.ws_row - 2;
+    char query[256] = {0};
+    size_t len = 0;
+    char c;
+    size_t selected = 0;
+    size_t offset = 0;
+
+    enter_alternate_buffer();
+    enable_raw_mode();
+    hide_cursor();
+
+    while (1) {
+        clear_screen();
+        fprintf(tty, "Query: %s\n", query);
+        sort_matched_item_list(&list, query);
+        print_matched_list_items(&list, selected, rows, offset);
+        fflush(tty);
+
+        int read_result = read(tty_fd, &c, 1);
+        if (read_result == -1) continue;
+        if (read_result == 0) break;
+
+        if (c == '\n') {
+            disable_raw_mode();
+            exit_alternate_buffer();
+            show_cursor();
+            fflush(tty);
+            fclose(tty);
+            printf("%s\n", list.items[selected]->text);
+            free_matched_item_list(&list);
+            exit(0);
+        }
+        if (c == '\033') {
+            char seq[2];
+            read(tty_fd, &seq[0], 1);
+            read(tty_fd, &seq[1], 1);
+            if (seq[0] == '[') {
+                if (seq[1] == 'A') {
+                    if (selected > 0) selected--;
+                    if (selected < offset) offset--;
+                }
+                if (seq[1] == 'B') {
+                    if (selected < list.count - 1) selected++;
+                    if (selected >= offset + rows) offset++;
+                }
+            }
+            continue;
+        }
+        if (c == 127) {
+            if (len > 0) {
+                len--;
+                query[len] = '\0';
+                selected = 0;
+            }
+        } else {
+            query[len] = c;
+            len++;
+            query[len] = '\0';
+            selected = 0;
         }
     }
 
-    sort_matched_item_list(&list);
-    print_matched_list_items(&list);
-
-    // if (fuzzy_match(haystack, input) != NULL) {
-    //     printf("Matches\n");
-    // } else {
-    //     printf("Does not match\n");
-    // }
-
     free_matched_item_list(&list);
+    disable_raw_mode();
+    exit_alternate_buffer();
+    show_cursor();
+    fclose(tty);
 
     return 0;
 }
