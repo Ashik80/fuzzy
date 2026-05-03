@@ -64,11 +64,30 @@ void add_matched_item_to_list(MatchedItemList *list, MatchedItem *item) {
     list->count++;
 }
 
-void print_matched_list_items(MatchedItemList *list, const size_t selected, const int rows, const int cols, const size_t offset, char *frame, int *frame_len) {
+char * copy_string(const char *src) {
+    size_t len = strlen(src) + 1;
+    char *mem = malloc(len);
+    if (!mem) {
+        printf("Failed to allocate memory for string\n");
+        exit(1);
+    }
+    memcpy(mem, src, len);
+    return mem;
+}
+
+void print_matched_list_items(
+        MatchedItemList *list,
+        const size_t selected,
+        const int rows,
+        const int cols,
+        const size_t offset,
+        char *frame,
+        int *frame_len) {
     for (size_t i = offset; i < list->count && i < offset + rows; i++) {
         MatchedItem *item = list->items[i];
-        char *text = item->text;
-        size_t text_len = strlen(text);
+        size_t text_len = strlen(item->text);
+        char *text = copy_string(item->text);
+        char *orig_text_p = text;
         int available_cols = cols - 4;
         if (available_cols < 1) available_cols = 1;
         if (text_len > (size_t)available_cols) {
@@ -83,6 +102,7 @@ void print_matched_list_items(MatchedItemList *list, const size_t selected, cons
         } else {
             *frame_len += snprintf(frame + *frame_len, FRAME_SIZE - *frame_len, "  %s\n", text);
         }
+        free(orig_text_p);
     }
 }
 
@@ -110,17 +130,6 @@ void free_matched_item_list(MatchedItemList *list) {
         free(list->items[i]);
     }
     free(list->items);
-}
-
-char * copy_string(const char *src) {
-    size_t len = strlen(src) + 1;
-    char *mem = malloc(len);
-    if (!mem) {
-        printf("Failed to allocate memory for string\n");
-        exit(1);
-    }
-    memcpy(mem, src, len);
-    return mem;
 }
 
 void read_from_input_or_pipe(MatchedItemList *list) {
