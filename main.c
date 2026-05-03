@@ -10,6 +10,8 @@
 #include "term_escapes.h"
 #include "term_mode.h"
 
+#define FRAME_SIZE 234234
+
 typedef struct {
     char *text;
     int score;
@@ -62,7 +64,7 @@ void add_matched_item_to_list(MatchedItemList *list, MatchedItem *item) {
     list->count++;
 }
 
-void print_matched_list_items(MatchedItemList *list, const size_t selected, const int rows, const int cols, const size_t offset) {
+void print_matched_list_items(MatchedItemList *list, const size_t selected, const int rows, const int cols, const size_t offset, char *frame, int *frame_len) {
     for (size_t i = offset; i < list->count && i < offset + rows; i++) {
         MatchedItem *item = list->items[i];
         char *text = item->text;
@@ -77,9 +79,9 @@ void print_matched_list_items(MatchedItemList *list, const size_t selected, cons
             text[2] = '.';
         }
         if (i == selected) {
-            fprintf(tty, "\033[1m> %s\033[0m\n", text);
+            *frame_len += snprintf(frame + *frame_len, FRAME_SIZE - *frame_len, "\033[1m> %s\033[0m\n", text);
         } else {
-            fprintf(tty, "  %s\n", text);
+            *frame_len += snprintf(frame + *frame_len, FRAME_SIZE - *frame_len, "  %s\n", text);
         }
     }
 }
@@ -215,21 +217,25 @@ int main(int argc, char **argv) {
     char c;
     size_t selected = 0;
     size_t offset = 0;
+    char frame[FRAME_SIZE];
+    int frame_len = 0;
 
     enter_alternate_buffer(tty);
     enable_raw_mode(tty_fd);
 
     while (1) {
+        frame_len = 0;
         clear_screen(tty);
-        fprintf(tty, "%s %s\n", prompt, query);
+        frame_len += snprintf(frame + frame_len, FRAME_SIZE - frame_len, "%s %s\n", prompt, query);
         for (size_t i = 0; i < (size_t)cols; i++) {
-            fprintf(tty, "—");
+            frame_len += snprintf(frame + frame_len, FRAME_SIZE - frame_len, "—");
         }
-        fprintf(tty, "\n");
+        frame_len += snprintf(frame + frame_len, FRAME_SIZE - frame_len, "\n");
         free(matched_list.items);
         matched_list = sort_matched_item_list(&list, query);
-        print_matched_list_items(&matched_list, selected, rows, cols, offset);
-        fprintf(tty, "\033[1;%zuH", strlen(prompt) + cursor + 2);
+        print_matched_list_items(&matched_list, selected, rows, cols, offset, frame, &frame_len);
+        frame_len += snprintf(frame + frame_len, FRAME_SIZE - frame_len, "\033[1;%zuH", strlen(prompt) + cursor + 2);
+        fwrite(frame, 1, frame_len, tty);
         fflush(tty);
 
         int read_result = read(tty_fd, &c, 1);
