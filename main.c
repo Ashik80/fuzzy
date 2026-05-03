@@ -77,7 +77,7 @@ void print_matched_list_items(MatchedItemList *list, const size_t selected, cons
             text[2] = '.';
         }
         if (i == selected) {
-            fprintf(tty, "> %s\n", text);
+            fprintf(tty, "\033[1m> %s\033[0m\n", text);
         } else {
             fprintf(tty, "  %s\n", text);
         }
