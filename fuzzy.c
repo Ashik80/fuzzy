@@ -22,10 +22,11 @@ int fuzzy_score(const char *haystack, const char *needle) {
     size_t ni = 0;
     size_t hi = 0;
     size_t nlen = strlen(needle);
-    int match_started = 0;
     char *last_slash = strrchr(haystack, '/');
-    // depth penalty
+    size_t last_slash_index = last_slash != NULL ? (size_t)(last_slash - haystack) : 0;
+    size_t in_last_segment = 0;
     int depth = 0;
+    // depth penalty
     for (size_t i = 0; haystack[i] != '\0'; i++) {
         if (haystack[i] == '/')
             depth++;
@@ -34,11 +35,11 @@ int fuzzy_score(const char *haystack, const char *needle) {
     // last occurence reward
     while (haystack[hi] != '\0') {
         if (tolower(haystack[hi]) == tolower(needle[ni])) {
-            if (match_started == 0) match_started = 1;
             // consecutive reward
             if (consecutive > 0) {
                 score += consecutive * 3;
             }
+            if (last_slash == NULL || hi > last_slash_index) in_last_segment++;
             // first letter in a segment reward
             if (hi == 0
                     || haystack[hi - 1] == ' '
@@ -54,19 +55,13 @@ int fuzzy_score(const char *haystack, const char *needle) {
             if (ni == nlen) break;
         } else {
             // not consecutive penalty
-            if (match_started == 1) score--;
+            if (consecutive > 0) score--;
             consecutive = 0;
         }
         hi++;
     }
-    if (ni == nlen) {
-        const char *filename = last_slash != NULL ? last_slash + 1 : haystack;
-        // check if needle matches somewhere in the filename portion alone
-        size_t temp_ni = 0;
-        for (size_t i = 0; filename[i] != '\0' && temp_ni < nlen; i++) {
-            if (tolower(filename[i]) == tolower(needle[temp_ni])) temp_ni++;
-        }
-        if (temp_ni == nlen) score += 20;
+    if (nlen == in_last_segment) {
+        score += 20;
     }
     return ni == nlen ? score : NO_MATCH;
 }
