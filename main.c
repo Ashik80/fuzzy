@@ -6,11 +6,13 @@
 #include <unistd.h>
 #include <sys/ioctl.h>
 #include <signal.h>
+#include <pthread.h>
 #include "fuzzy.h"
 #include "term_escapes.h"
 #include "term_mode.h"
 
 #define FRAME_SIZE 234234
+#define INITIAL_MATCH_LIST_SIZE 10
 
 typedef struct {
     char *text;
@@ -27,6 +29,12 @@ MatchedItemList list;
 MatchedItemList matched_list;
 int tty_fd;
 FILE *tty;
+size_t files_traversed = 0;
+pthread_mutex_t list_mutex = PTHREAD_MUTEX_INITIALIZER;
+pthread_cond_t data_ready = PTHREAD_COND_INITIALIZER;
+pthread_t loader;
+int loader_started = 0;
+int has_data = 0;
 
 MatchedItem * add_score_to_item(char *text, int score) {
     MatchedItem *item = malloc(sizeof(MatchedItem));
@@ -40,7 +48,7 @@ MatchedItem * add_score_to_item(char *text, int score) {
 }
 
 void init_matched_item_list(MatchedItemList *list) {
-    list->size = 5;
+    list->size = INITIAL_MATCH_LIST_SIZE;
     list->count = 0;
     MatchedItem **mem = malloc(list->size * sizeof(MatchedItem *));
     if (!mem) {
@@ -132,15 +140,27 @@ void free_matched_item_list(MatchedItemList *list) {
     free(list->items);
 }
 
-void read_from_input_or_pipe(MatchedItemList *list) {
+void *load_from_pipe(void *argv) {
+    int fd = *(int *)argv;
+    free(argv);
+    FILE *pipe = fdopen(fd, "r");
     char buffer[1024];
-    while (fgets(buffer, sizeof(buffer), stdin)) {
-        if (buffer[strlen(buffer) - 1] == '\n') {
-            buffer[strlen(buffer) - 1] = '\0';
+    while (fgets(buffer, sizeof(buffer), pipe)) {
+        size_t len = strlen(buffer);
+        if (buffer[len - 1] == '\n') {
+            buffer[len - 1] = '\0';
         }
         MatchedItem *item = add_score_to_item(copy_string(buffer), 0);
-        add_matched_item_to_list(list, item);
+        pthread_mutex_lock(&list_mutex);
+        add_matched_item_to_list(&list, item);
+        if (!has_data) {
+            has_data = 1;
+            pthread_cond_signal(&data_ready);
+        }
+        pthread_mutex_unlock(&list_mutex);
     }
+    fclose(pipe);
+    return NULL;
 }
 
 void read_from_directory(MatchedItemList *list, char *base_path) {
@@ -172,6 +192,10 @@ void read_from_directory(MatchedItemList *list, char *base_path) {
 }
 
 void restore_terminal(int) {
+    if (loader) {
+        pthread_cancel(loader);
+        pthread_join(loader, NULL);
+    }
     free_matched_item_list(&list);
     free(matched_list.items); // only free the pointer, not items - owned by list
     disable_raw_mode(tty_fd);
@@ -206,14 +230,17 @@ int main(int argc, char **argv) {
         }
     }
 
-    open_terminal();
-
     init_matched_item_list(&list);
 
     if (isatty(STDIN_FILENO)) {
+        open_terminal();
         read_from_directory(&list, ".");
     } else {
-        read_from_input_or_pipe(&list);
+        int *fd = malloc(sizeof(int));
+        *fd = dup(STDIN_FILENO);
+        open_terminal();
+        pthread_create(&loader, NULL, load_from_pipe, fd);
+        loader_started = 1;
     }
 
     struct winsize w;
@@ -232,6 +259,14 @@ int main(int argc, char **argv) {
     enter_alternate_buffer(tty);
     enable_raw_mode(tty_fd);
 
+    if (loader_started) {
+        pthread_mutex_lock(&list_mutex);
+        while (!has_data) {
+            pthread_cond_wait(&data_ready, &list_mutex);
+        }
+        pthread_mutex_unlock(&list_mutex);
+    }
+
     while (1) {
         frame_len = 0;
         clear_screen(tty);
@@ -241,7 +276,9 @@ int main(int argc, char **argv) {
         }
         frame_len += snprintf(frame + frame_len, FRAME_SIZE - frame_len, "\n");
         free(matched_list.items);
+        pthread_mutex_lock(&list_mutex);
         matched_list = sort_matched_item_list(&list, query);
+        pthread_mutex_unlock(&list_mutex);
         print_matched_list_items(&matched_list, selected, rows, cols, offset, frame, &frame_len);
         frame_len += snprintf(frame + frame_len, FRAME_SIZE - frame_len, "\033[1;%zuH", strlen(prompt) + cursor + 2);
         fwrite(frame, 1, frame_len, tty);
@@ -253,6 +290,10 @@ int main(int argc, char **argv) {
 
         if (c == '\n' || c == 0x19) { // enter or ctrl-y
             if (matched_list.count <= 0) continue;
+            if (loader) {
+                pthread_cancel(loader);
+                pthread_join(loader, NULL);
+            }
             disable_raw_mode(tty_fd);
             exit_alternate_buffer(tty);
             show_cursor(tty);
@@ -334,6 +375,10 @@ int main(int argc, char **argv) {
         }
     }
 
+    if (loader) {
+        pthread_cancel(loader);
+        pthread_join(loader, NULL);
+    }
     free_matched_item_list(&list);
     free(matched_list.items);
     disable_raw_mode(tty_fd);
