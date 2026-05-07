@@ -140,9 +140,17 @@ void free_matched_item_list(MatchedItemList *list) {
     free(list->items);
 }
 
-void *load_from_pipe(void *argv) {
-    int fd = *(int *)argv;
-    free(argv);
+typedef struct {
+    int *fd;
+    int rows;
+} LoadFromPipeArgs;
+
+void *load_from_pipe(void *args) {
+    LoadFromPipeArgs *pipe_args = (LoadFromPipeArgs *)args;
+    int fd = *pipe_args->fd;
+    int rows = pipe_args->rows;
+    free(pipe_args->fd);
+    free(pipe_args);
     FILE *pipe = fdopen(fd, "r");
     char buffer[1024];
     while (fgets(buffer, sizeof(buffer), pipe)) {
@@ -153,17 +161,21 @@ void *load_from_pipe(void *argv) {
         MatchedItem *item = add_score_to_item(copy_string(buffer), 0);
         pthread_mutex_lock(&list_mutex);
         add_matched_item_to_list(&list, item);
-        if (!has_data) {
+        if (list.count >= (size_t)rows) {
             has_data = 1;
             pthread_cond_signal(&data_ready);
         }
         pthread_mutex_unlock(&list_mutex);
     }
+    pthread_mutex_lock(&list_mutex);
+    has_data = 1;
+    pthread_cond_signal(&data_ready);
+    pthread_mutex_unlock(&list_mutex);
     fclose(pipe);
     return NULL;
 }
 
-void read_from_directory(MatchedItemList *list, char *base_path) {
+void read_from_directory(char *base_path, int rows) {
     DIR *dir = opendir(base_path);
     if (dir == NULL) {
         printf("Failed to open directory: %s\n", base_path);
@@ -181,14 +193,36 @@ void read_from_directory(MatchedItemList *list, char *base_path) {
         }
         snprintf(path, path_len, "%s/%s", base_path, entry->d_name);
         if (entry->d_type == DT_DIR) {
-            read_from_directory(list, path);
+            read_from_directory(path, rows);
             free(path);
         } else {
             MatchedItem *item = add_score_to_item(path, 0);
-            add_matched_item_to_list(list, item);
+            pthread_mutex_lock(&list_mutex);
+            add_matched_item_to_list(&list, item);
+            if (list.count >= (size_t)rows) {
+                has_data = 1;
+                pthread_cond_signal(&data_ready);
+            }
+            pthread_mutex_unlock(&list_mutex);
         }
     }
     closedir(dir);
+}
+
+typedef struct {
+    char *base_path;
+    int rows;
+} LoadFromDirectoryArgs;
+
+void *load_from_directory(void *args) {
+    LoadFromDirectoryArgs *dir_args = (LoadFromDirectoryArgs *)args;
+    read_from_directory(dir_args->base_path, dir_args->rows);
+    free(dir_args);
+    pthread_mutex_lock(&list_mutex);
+    has_data = 1;
+    pthread_cond_signal(&data_ready);
+    pthread_mutex_unlock(&list_mutex);
+    return NULL;
 }
 
 void restore_terminal(int) {
@@ -218,7 +252,22 @@ void open_terminal() {
 int main(int argc, char **argv) {
     signal(SIGINT, restore_terminal);
 
+    open_terminal();
+
+    struct winsize w;
+    ioctl(tty_fd, TIOCGWINSZ, &w);
+    int rows = w.ws_row - 3;
+    int cols = w.ws_col;
+    char query[256] = {0};
+    size_t len = 0;
+    size_t cursor = 0;
+    char c;
+    size_t selected = 0;
+    size_t offset = 0;
+    char frame[FRAME_SIZE];
+    int frame_len = 0;
     char *prompt = "Query>";
+
     for (size_t i = 1; i < (size_t)argc; i++) {
         if (strcmp(argv[i], "-p") == 0) {
             if (i + 1 >= (size_t)argc) {
@@ -233,28 +282,20 @@ int main(int argc, char **argv) {
     init_matched_item_list(&list);
 
     if (isatty(STDIN_FILENO)) {
-        open_terminal();
-        read_from_directory(&list, ".");
+        LoadFromDirectoryArgs *dirargs = malloc(sizeof(LoadFromDirectoryArgs));
+        dirargs->base_path = ".";
+        dirargs->rows = rows;
+        pthread_create(&loader, NULL, load_from_directory, dirargs);
+        loader_started = 1;
     } else {
         int *fd = malloc(sizeof(int));
         *fd = dup(STDIN_FILENO);
-        open_terminal();
-        pthread_create(&loader, NULL, load_from_pipe, fd);
+        LoadFromPipeArgs *pipe_args = malloc(sizeof(LoadFromPipeArgs));
+        pipe_args->fd = fd;
+        pipe_args->rows = rows;
+        pthread_create(&loader, NULL, load_from_pipe, pipe_args);
         loader_started = 1;
     }
-
-    struct winsize w;
-    ioctl(tty_fd, TIOCGWINSZ, &w);
-    int rows = w.ws_row - 3;
-    int cols = w.ws_col;
-    char query[256] = {0};
-    size_t len = 0;
-    size_t cursor = 0;
-    char c;
-    size_t selected = 0;
-    size_t offset = 0;
-    char frame[FRAME_SIZE];
-    int frame_len = 0;
 
     enter_alternate_buffer(tty);
     enable_raw_mode(tty_fd);
